@@ -273,27 +273,133 @@ The Flutter web client is available at `/flutter` and successfully connects to t
 
 ## Task 3A — Structured logging
 
-<!-- Paste happy-path and error-path log excerpts, VictoriaLogs query screenshot -->
+### Happy-path log excerpt
+```text
+2026-03-28 00:46:01,009 INFO [app.main] [main.py:60] [trace_id=53e63f983a92f99ac23fdb95f0bbeb69 span_id=e0696b87796f91bc resource.service.name=Learning Management Service trace_sampled=True] - request_started
+2026-03-28 00:46:01,011 INFO [app.auth] [auth.py:30] [trace_id=53e63f983a92f99ac23fdb95f0bbeb69 span_id=e0696b87796f91bc resource.service.name=Learning Management Service trace_sampled=True] - auth_success
+2026-03-28 00:46:01,011 INFO [app.db.items] [items.py:16] [trace_id=53e63f983a92f99ac23fdb95f0bbeb69 span_id=e0696b87796f91bc resource.service.name=Learning Management Service trace_sampled=True] - db_query
+2026-03-28 00:46:01,139 INFO [app.main] [main.py:68] [trace_id=53e63f983a92f99ac23fdb95f0bbeb69 span_id=e0696b87796f91bc resource.service.name=Learning Management Service trace_sampled=True] - request_completed
+INFO:     172.21.0.9:52274 - "GET /items/ HTTP/1.1" 200
+INFO:     172.21.0.9:52274 - "GET /items/ HTTP/1.1" 200 OK
+
+###Error-path log excerpt
+
+2026-03-28 00:50:03,205 INFO [app.main] [main.py:60] [trace_id=fa3318d80914a1150f5f7bf9418cb158 span_id=7c3cf3f6a7994391 resource.service.name=Learning Management Service trace_sampled=True] - request_started
+2026-03-28 00:50:03,207 INFO [app.auth] [auth.py:30] [trace_id=fa3318d80914a1150f5f7bf9418cb158 span_id=7c3cf3f6a7994391 resource.service.name=Learning Management Service trace_sampled=True] - auth_success
+2026-03-28 00:50:03,207 INFO [app.db.items] [items.py:16] [trace_id=fa3318d80914a1150f5f7bf9418cb158 span_id=7c3cf3f6a7994391 resource.service.name=Learning Management Service trace_sampled=True] - db_query
+2026-03-28 00:50:03,461 ERROR [app.db.items] [items.py:20] [trace_id=fa3318d80914a1150f5f7bf9418cb158 span_id=7c3cf3f6a7994391 resource.service.name=Learning Management Service trace_sampled=True] - db_query
+2026-03-28 00:50:03,462 INFO [app.main] [main.py:68] [trace_id=fa3318d80914a1150f5f7bf9418cb158 span_id=7c3cf3f6a7994391 resource.service.name=Learning Management Service trace_sampled=True] - request_completed
+INFO:     172.21.0.1:37078 - "GET /items/ HTTP/1.1" 404 Not Found
+INFO:     172.21.0.1:37078 - "GET /items/ HTTP/1.1" 404
+
+### VictoriaLogs query used
+fa3318d80914a1150f5f7bf9418cb158
+
+### VictoriaLogs screenshot
+![Task 3A VictoriaLogs](report_assets/lab82.png)
 
 ## Task 3B — Traces
 
-<!-- Screenshots: healthy trace span hierarchy, error trace -->
+### Healthy trace
+![Task 3B healthy trace](report_assets/task3b-trace-healthy.png)
+
+### Error trace
+![Task 3B error trace](report_assets/task3b-trace-error.png)
 
 ## Task 3C — Observability MCP tools
 
-<!-- Paste agent responses to "any errors in the last hour?" under normal and failure conditions -->
+### Prompt
+Any errors in the last hour?
+
+### Agent response under normal conditions
+I queried the observability tool `logs_error_count` over the recent time window. The tool executed successfully and returned zero recent errors for all tracked services.
+
+### Raw tool output
+[
+  {
+    "service": "backend",
+    "errors": 0
+  },
+  {
+    "service": "nanobot",
+    "errors": 0
+  },
+  {
+    "service": "qwen-code-api",
+    "errors": 0
+  },
+  {
+    "service": "postgres",
+    "errors": 0
+  },
+  {
+    "service": "caddy",
+    "errors": 0
+  }
+]
+
+###Agent response after PostgreSQL failure
+After stopping PostgreSQL and generating failed backend requests, I queried logs_error_count again. The tool still returned zero counts for all tracked services in the selected observation window.
+
+###Raw tool output
+[
+  {
+    "service": "backend",
+    "errors": 0
+  },
+  {
+    "service": "nanobot",
+    "errors": 0
+  },
+  {
+    "service": "qwen-code-api",
+    "errors": 0
+  },
+  {
+    "service": "postgres",
+    "errors": 0
+  },
+  {
+    "service": "caddy",
+    "errors": 0
+  }
+]
 
 ## Task 4A — Multi-step investigation
 
-<!-- Paste the agent's response to "What went wrong?" showing chained log + trace investigation -->
+Symptom — after PostgreSQL was stopped, the `/items/` request failed and the user-facing response was `404 Items not found`.
+
+Log evidence — backend logs showed a real database failure during `db_query`:
+- timestamp: `2026-03-28 10:24:24`
+- service: `Learning Management Service`
+- trace id: `6e9dfe4c8625986ec433ec8125f4e936`
+- failing operation: `ERROR [app.db.items] - db_query`
+
+Trace evidence — the failing request was correlated with trace id `6e9dfe4c8625986ec433ec8125f4e936`.
+
+Likely cause — PostgreSQL was unavailable, but `GET /items/` was masking the backend/database failure as `404 Items not found` because of a broad exception handler in `backend/app/routers/items.py`.
 
 ## Task 4B — Proactive health check
 
-<!-- Screenshot or transcript of the proactive health report that appears in the Flutter chat -->
+I updated the observability skill and the agent instructions so that recurring health checks use the built-in cron workflow, inspect recent backend errors, and use traces when available.
+
+Expected proactive behavior for the reproduced failure:
+- when PostgreSQL is down, the health check should detect recent backend `ERROR` logs for `db_query`
+- it should include the related trace id when present
+- it should post a short summary explaining that the system is unhealthy because the backend cannot query PostgreSQL
+
+Expected healthy follow-up behavior after recovery:
+- once PostgreSQL is started again and `/items/` succeeds, the health check should report that the system looks healthy and that no recent backend errors were found
 
 ## Task 4C — Bug fix and recovery
 
-<!-- 1. Root cause identified
-     2. Code fix (diff or description)
-     3. Post-fix response to "What went wrong?" showing the real underlying failure
-     4. Healthy follow-up report or transcript after recovery -->
+1. **Root cause** — the planted bug was in `backend/app/routers/items.py` inside `GET /items/`. It caught any backend/database exception and incorrectly converted it into `404 Items not found`, which masked the real PostgreSQL failure.
+
+2. **Fix** — I removed the broad `try/except` in `get_items()` so the original database exception propagates normally and the real backend/database failure is visible.
+
+3. **Post-fix failure check**
+After the fix, the route no longer masks database failures as `404 Items not found`. The backend now exposes the real failure path when PostgreSQL is unavailable.
+
+4. **Healthy follow-up**
+After PostgreSQL was started again, the backend returned data successfully from `/items/`, confirming that the service recovered and lab data became available again.
+
