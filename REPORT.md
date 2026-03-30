@@ -403,3 +403,5 @@ After the fix, the route no longer masks database failures as `404 Items not fou
 4. **Healthy follow-up**
 After PostgreSQL was started again, the backend returned data successfully from `/items/`, confirming that the service recovered and lab data became available again.
 
+
+<!-- task4 final PR marker -->
