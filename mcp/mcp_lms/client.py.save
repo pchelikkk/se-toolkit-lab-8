@@ -1,9 +1,5 @@
 """Async HTTP client, models, and formatters for the LMS backend API."""
 
-import json
-import os
-from datetime import datetime, timedelta, timezone
-from typing import Any
 
 import httpx
 from pydantic import BaseModel
@@ -69,27 +65,6 @@ class SyncResult(BaseModel):
     total_records: int
 
 
-class LogEntry(BaseModel):
-    fields: dict[str, Any]
-
-
-class ErrorCount(BaseModel):
-    service: str
-    errors: int
-
-
-class TraceSummary(BaseModel):
-    trace_id: str
-    span_count: int
-    services: list[str]
-    raw: dict[str, Any]
-
-
-class TraceDetails(BaseModel):
-    trace_id: str
-    raw: dict[str, Any]
-
-
 # ---------------------------------------------------------------------------
 # HTTP client
 # ---------------------------------------------------------------------------
@@ -101,22 +76,9 @@ class LMSClient:
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {api_key}"}
-        self.logs_url = os.environ.get("VICTORIALOGS_URL", "http://victorialogs:9428").rstrip("/")
-        self.traces_url = os.environ.get("VICTORIATRACES_URL", "http://victoriatraces:10428").rstrip("/")
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(headers=self._headers, timeout=10.0)
-
-    def _time_range_rfc3339(self, minutes: int) -> tuple[str, str]:
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(minutes=minutes)
-        fmt = "%Y-%m-%dT%H:%M:%SZ"
-        return start.strftime(fmt), end.strftime(fmt)
-
-    def _time_range_us(self, minutes: int) -> tuple[int, int]:
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(minutes=minutes)
-        return int(start.timestamp() * 1_000_000), int(end.timestamp() * 1_000_000)
 
     async def health_check(self) -> HealthResult:
         async with self._client() as c:
@@ -191,104 +153,6 @@ class LMSClient:
             r.raise_for_status()
             return SyncResult.model_validate(r.json())
 
-    async def logs_search(
-        self, query: str, minutes: int = 60, limit: int = 20
-    ) -> list[LogEntry]:
-        start, end = self._time_range_rfc3339(minutes)
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.post(
-                f"{self.logs_url}/select/logsql/query",
-                data={
-                    "query": query,
-                    "limit": str(limit),
-                    "start": start,
-                    "end": end,
-                },
-            )
-            r.raise_for_status()
-
-        result: list[LogEntry] = []
-        for line in r.text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                obj = {"_msg": line}
-            result.append(LogEntry(fields=obj))
-        return result
-
-    async def logs_error_count(
-        self, minutes: int = 60
-    ) -> list[ErrorCount]:
-        query_map = {
-            "backend": "ERROR AND app.db.items",
-            "nanobot": "ERROR AND nanobot.agent.loop",
-            "qwen-code-api": "Unauthorized",
-            "postgres": "FATAL",
-            "caddy": "connection refused",
-        }
-
-        result: list[ErrorCount] = []
-        for service, query in query_map.items():
-            try:
-                entries = await self.logs_search(
-                    query=query,
-                    minutes=minutes,
-                    limit=500,
-                )
-                result.append(ErrorCount(service=service, errors=len(entries)))
-            except Exception:
-                result.append(ErrorCount(service=service, errors=-1))
-        return result
-
-    async def traces_list(
-        self, service: str, minutes: int = 60, limit: int = 5
-    ) -> list[TraceSummary]:
-        start, end = self._time_range_us(minutes)
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.get(
-                f"{self.traces_url}/select/jaeger/api/traces",
-                params={
-                    "service": service,
-                    "limit": limit,
-                    "start": start,
-                    "end": end,
-                },
-            )
-            r.raise_for_status()
-            payload = r.json().get("data", [])
-
-        result: list[TraceSummary] = []
-        for trace in payload:
-            processes = trace.get("processes", {})
-            services = sorted(
-                {
-                    proc.get("serviceName", "")
-                    for proc in processes.values()
-                    if proc.get("serviceName")
-                }
-            )
-            result.append(
-                TraceSummary(
-                    trace_id=trace.get("traceID", ""),
-                    span_count=len(trace.get("spans", [])),
-                    services=services,
-                    raw=trace,
-                )
-            )
-        return result
-
-    async def traces_get(self, trace_id: str) -> TraceDetails:
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.get(f"{self.traces_url}/select/jaeger/api/traces/{trace_id}")
-            r.raise_for_status()
-            payload = r.json().get("data", [])
-
-        trace = payload[0] if payload else {}
-        return TraceDetails(trace_id=trace.get("traceID", trace_id), raw=trace)
-
 
 # ---------------------------------------------------------------------------
 # Formatters
@@ -297,8 +161,8 @@ class LMSClient:
 
 def format_health(result: HealthResult) -> str:
     if result.status == "healthy":
-        return f"✅ Backend is healthy. {result.item_count} items available."
-    return f"❌ Backend error: {result.error or 'Unknown'}"
+        return f"\u2705 Backend is healthy. {result.item_count} items available."
+    return f"\u274c Backend error: {result.error or 'Unknown'}"
 
 
 def format_labs(items: list[Item]) -> str:
@@ -307,17 +171,17 @@ def format_labs(items: list[Item]) -> str:
         key=lambda x: str(x.id),
     )
     if not labs:
-        return "📭 No labs available."
-    text = "📚 Available labs:\n\n"
-    text += "\n".join(f"• {lab.title}" for lab in labs)
+        return "\U0001f4ed No labs available."
+    text = "\U0001f4da Available labs:\n\n"
+    text += "\n".join(f"\u2022 {lab.title}" for lab in labs)
     return text
 
 
 def format_scores(lab: str, rates: list[PassRate]) -> str:
     if not rates:
-        return f"📭 No scores found for {lab}."
-    text = f"📊 Pass rates for {lab}:\n\n"
+        return f"\U0001f4ed No scores found for {lab}."
+    text = f"\U0001f4ca Pass rates for {lab}:\n\n"
     text += "\n".join(
-        f"• {r.task}: {r.avg_score:.1f}% ({r.attempts} attempts)" for r in rates
+        f"\u2022 {r.task}: {r.avg_score:.1f}% ({r.attempts} attempts)" for r in rates
     )
     return text
