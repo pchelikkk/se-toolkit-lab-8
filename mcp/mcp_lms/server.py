@@ -19,13 +19,9 @@ _base_url: str = ""
 
 server = Server("lms")
 
-# ---------------------------------------------------------------------------
-# Input models
-# ---------------------------------------------------------------------------
-
 
 class _NoArgs(BaseModel):
-    """Empty input model for tools that only need server-side configuration."""
+    pass
 
 
 class _LabQuery(BaseModel):
@@ -33,14 +29,11 @@ class _LabQuery(BaseModel):
 
 
 class _TopLearnersQuery(_LabQuery):
-    limit: int = Field(
-        default=5, ge=1, description="Max learners to return (default 5)."
-    )
+    limit: int = Field(default=5, ge=1, description="Max learners to return (default 5).")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+class _LogsErrorCountQuery(BaseModel):
+    minutes: int = Field(default=60, ge=1, le=1440)
 
 
 def _resolve_api_key() -> str:
@@ -48,31 +41,21 @@ def _resolve_api_key() -> str:
         value = os.environ.get(name, "").strip()
         if value:
             return value
-    raise RuntimeError(
-        "LMS API key not configured. Set NANOBOT_LMS_API_KEY or LMS_API_KEY."
-    )
+    raise RuntimeError("LMS API key not configured. Set NANOBOT_LMS_API_KEY or LMS_API_KEY.")
 
 
 def _client() -> LMSClient:
     if not _base_url:
-        raise RuntimeError(
-            "LMS backend URL not configured. Pass it as: python -m mcp_lms <base_url>"
-        )
+        raise RuntimeError("LMS backend URL not configured. Pass it as: python -m mcp_lms <base_url>")
     return LMSClient(_base_url, _resolve_api_key())
 
 
 def _text(data: BaseModel | Sequence[BaseModel]) -> list[TextContent]:
-    """Serialize a pydantic model (or list of models) to a JSON text block."""
     if isinstance(data, BaseModel):
         payload = data.model_dump()
     else:
         payload = [item.model_dump() for item in data]
     return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
-
-
-# ---------------------------------------------------------------------------
-# Tool handlers
-# ---------------------------------------------------------------------------
 
 
 async def _health(_args: _NoArgs) -> list[TextContent]:
@@ -112,12 +95,11 @@ async def _sync_pipeline(_args: _NoArgs) -> list[TextContent]:
     return _text(await _client().sync_pipeline())
 
 
-# ---------------------------------------------------------------------------
-# Registry: tool name -> (input model, handler, Tool definition)
-# ---------------------------------------------------------------------------
+async def _logs_error_count(args: _LogsErrorCountQuery) -> list[TextContent]:
+    return _text(await _client().logs_error_count(minutes=args.minutes))
+
 
 _Registry = tuple[type[BaseModel], Callable[..., Awaitable[list[TextContent]]], Tool]
-
 _TOOLS: dict[str, _Registry] = {}
 
 
@@ -128,7 +110,6 @@ def _register(
     handler: Callable[..., Awaitable[list[TextContent]]],
 ) -> None:
     schema = model.model_json_schema()
-    # Pydantic puts definitions under $defs; flatten for MCP's JSON Schema expectation.
     schema.pop("$defs", None)
     schema.pop("title", None)
     _TOOLS[name] = (
@@ -138,57 +119,16 @@ def _register(
     )
 
 
-_register(
-    "lms_health",
-    "Check if the LMS backend is healthy and report the item count.",
-    _NoArgs,
-    _health,
-)
+_register("lms_health", "Check if the LMS backend is healthy and report the item count.", _NoArgs, _health)
 _register("lms_labs", "List all labs available in the LMS.", _NoArgs, _labs)
-_register(
-    "lms_learners", "List all learners registered in the LMS.", _NoArgs, _learners
-)
-_register(
-    "lms_pass_rates",
-    "Get pass rates (avg score and attempt count per task) for a lab.",
-    _LabQuery,
-    _pass_rates,
-)
-_register(
-    "lms_timeline",
-    "Get submission timeline (date + submission count) for a lab.",
-    _LabQuery,
-    _timeline,
-)
-_register(
-    "lms_groups",
-    "Get group performance (avg score + student count per group) for a lab.",
-    _LabQuery,
-    _groups,
-)
-_register(
-    "lms_top_learners",
-    "Get top learners by average score for a lab.",
-    _TopLearnersQuery,
-    _top_learners,
-)
-_register(
-    "lms_completion_rate",
-    "Get completion rate (passed / total) for a lab.",
-    _LabQuery,
-    _completion_rate,
-)
-_register(
-    "lms_sync_pipeline",
-    "Trigger the LMS sync pipeline. May take a moment.",
-    _NoArgs,
-    _sync_pipeline,
-)
-
-
-# ---------------------------------------------------------------------------
-# MCP handlers
-# ---------------------------------------------------------------------------
+_register("lms_learners", "List all learners registered in the LMS.", _NoArgs, _learners)
+_register("lms_pass_rates", "Get pass rates (avg score and attempt count per task) for a lab.", _LabQuery, _pass_rates)
+_register("lms_timeline", "Get submission timeline (date + submission count) for a lab.", _LabQuery, _timeline)
+_register("lms_groups", "Get group performance (avg score + student count per group) for a lab.", _LabQuery, _groups)
+_register("lms_top_learners", "Get top learners by average score for a lab.", _TopLearnersQuery, _top_learners)
+_register("lms_completion_rate", "Get completion rate (passed / total) for a lab.", _LabQuery, _completion_rate)
+_register("lms_sync_pipeline", "Trigger the LMS sync pipeline. May take a moment.", _NoArgs, _sync_pipeline)
+_register("logs_error_count", "Count recent error logs per service.", _LogsErrorCountQuery, _logs_error_count)
 
 
 @server.list_tools()
@@ -208,11 +148,6 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextCon
         return await handler(args)
     except Exception as exc:
         return [TextContent(type="text", text=f"Error: {type(exc).__name__}: {exc}")]
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 async def main(base_url: str | None = None) -> None:
